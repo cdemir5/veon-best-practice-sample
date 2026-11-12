@@ -1,0 +1,18 @@
+{{- /* Node drain / cluster upgrade sırasında aynı anda en fazla 1 replika düşsün. */ -}}
+{{- range $name := list "backend" "worker" "frontend" }}
+{{- $spec := index $.Values $name }}
+{{- if $spec.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "vsa.fullname" $ }}-{{ $name }}
+  labels:
+    {{- include "vsa.componentLabels" (dict "ctx" $ "component" $name) | nindent 4 }}
+spec:
+  maxUnavailable: {{ $spec.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "vsa.selectorLabels" (dict "ctx" $ "component" $name) | nindent 6 }}
+{{- end }}
+{{- end }}

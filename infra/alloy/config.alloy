@@ -1,0 +1,86 @@
+// Grafana Alloy — uygulama trace'leri için OTLP toplayıcı (local compose).
+// Üretimdeki VEON observability bundle'ı (veon-observability-alloy) ile aynı rol:
+//   uygulama --OTLP/HTTP:4318--> Alloy --(memory_limiter, scrub, batch)--┬--> Tempo
+//                                                                       └--> Jaeger
+// Uygulama Tempo'yu/Jaeger'ı bilmez; backend eklemek/değiştirmek yalnız bu dosyadadır.
+
+logging {
+  level  = "info"
+  format = "json"
+}
+
+otelcol.receiver.otlp "applications" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    traces = [otelcol.processor.memory_limiter.bounded.input]
+  }
+}
+
+// Ani yük artışında collector OOM olmasın: limit aşılırsa veri reddedilir
+// (uygulama SDK'sı span'i düşürür, iş akışı etkilenmez).
+otelcol.processor.memory_limiter "bounded" {
+  check_interval = "1s"
+  limit          = "256MiB"
+  spike_limit    = "64MiB"
+  output {
+    traces = [otelcol.processor.attributes.scrub.input]
+  }
+}
+
+// İkinci savunma hattı: hassas olabilecek attribute'lar collector'da silinir.
+// Üretim bundle'ı daha katı bir allowlist (transform/keep_keys) uygular.
+otelcol.processor.attributes "scrub" {
+  action {
+    key    = "db.statement"
+    action = "delete"
+  }
+  action {
+    key    = "http.request.header.authorization"
+    action = "delete"
+  }
+  action {
+    key    = "http.request.header.cookie"
+    action = "delete"
+  }
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  timeout             = "2s"
+  send_batch_size     = 256
+  send_batch_max_size = 512
+  output {
+    // Fan-out: aynı trace'ler iki backend'e. Her exporter'ın kendi kuyruğu/retry'ı vardır;
+    // biri erişilemezse diğeri etkilenmez.
+    traces = [
+      otelcol.exporter.otlp.tempo.input,
+      otelcol.exporter.otlp.jaeger.input,
+    ]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Jaeger v2 OTLP'yi doğal olarak kabul eder (eski Jaeger/Thrift exporter'ına gerek yok).
+otelcol.exporter.otlp "jaeger" {
+  client {
+    endpoint = "jaeger:4317"
+    tls {
+      insecure = true
+    }
+  }
+}

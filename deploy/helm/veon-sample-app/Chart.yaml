@@ -1,0 +1,10 @@
+apiVersion: v2
+name: veon-sample-app
+description: VEON best-practice örnek uygulaması (API + event worker + frontend) — tracing, monitoring, logging, Redis HA, asenkron event pipeline
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords: [veon, observability, redis, sentinel, opentelemetry]
+annotations:
+  veon/observability: "Prometheus ServiceMonitor + PrometheusRule + Grafana dashboard ConfigMap; OTLP → veon-observability-alloy"

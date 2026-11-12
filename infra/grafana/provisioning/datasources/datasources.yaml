@@ -1,0 +1,72 @@
+# Üç sinyal birbirine bağlanır:
+#   metric (exemplar trace_id) ──► Tempo
+#   log    (otel_trace_id)     ──► Tempo        (VEON Loki derived field ile aynı regex)
+#   trace                      ──► Loki / Prometheus
+# Not: provisioning dosyalarında `$` ortam değişkeni sayılır; Grafana değişkenleri `$$` ile kaçırılır.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus  # VEON operations dashboard'u da bu UID'yi bekler
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"otel_trace_id"\s*:\s*"([a-f0-9]{32})"'
+          datasourceUid: tempo
+          url: '$${__value.raw}'
+          urlDisplayLabel: Tempo'da aç
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-2m'
+        spanEndTimeShift: '2m'
+        customQuery: true
+        query: '{job="fluent-bit"} |= "$${__span.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      lokiSearch:
+        datasourceUid: loki
+
+  # Aynı trace'ler Jaeger'da da var (Alloy fan-out). Grafana içinden de sorgulanabilir.
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-2m'
+        spanEndTimeShift: '2m'
+        customQuery: true
+        query: '{job="fluent-bit"} |= "$${__span.traceId}"'
+      nodeGraph:
+        enabled: true

@@ -1,0 +1,32 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "vsa.fullname" . }}
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Tek giriş: nginx /api'yi backend Service'ine proxy'ler (metrik portu dışarı açılmaz).
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "vsa.fullname" . }}-frontend
+                port:
+                  name: http
+{{- end }}

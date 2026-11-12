@@ -1,0 +1,23 @@
+# Sürümler bilinçli olarak sabitlenmiştir (reproducible build).
+# Güncellemeler Renovate/Dependabot PR'ı + CI testleri ile yapılmalıdır.
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic-settings==2.9.1
+httpx==0.28.1
+
+# Redis: Sentinel + asyncio + Retry/Backoff desteği
+redis==6.2.0
+
+# MongoDB: Motor EOL oldu (Mayıs 2026). Yerine PyMongo'nun native async API'si.
+pymongo==4.13.2
+
+# Monitoring
+prometheus-client==0.22.1
+
+# Tracing (OpenTelemetry) — api/sdk ile instrumentation sürümleri eşleşmelidir (1.33.1 <-> 0.54b1)
+opentelemetry-api==1.33.1
+opentelemetry-sdk==1.33.1
+opentelemetry-exporter-otlp-proto-http==1.33.1
+opentelemetry-instrumentation-fastapi==0.54b1
+opentelemetry-instrumentation-redis==0.54b1
+opentelemetry-instrumentation-pymongo==0.54b1

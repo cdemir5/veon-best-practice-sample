@@ -1,0 +1,26 @@
+{{- $fullname := include "vsa.fullname" . -}}
+veon-sample-app {{ .Chart.AppVersion }} kuruldu ({{ .Release.Namespace }}).
+
+1) Durum:
+   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+   helm -n {{ .Release.Namespace }} test {{ .Release.Name }}
+
+2) Arayüz:
+{{- if .Values.ingress.enabled }}
+   https://{{ .Values.ingress.host }}
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }}-frontend 8080:8080
+   → http://localhost:8080
+{{- end }}
+
+3) Gözlemlenebilirlik:
+   - Metrikler : ServiceMonitor/{{ $fullname }} {{ if not .Values.metrics.serviceMonitor.enabled }}(KAPALI){{ end }}
+   - Alarmlar  : PrometheusRule/{{ $fullname }} {{ if not .Values.metrics.prometheusRule.enabled }}(KAPALI){{ end }}
+   - Dashboard : ConfigMap/{{ $fullname }}-dashboard (Grafana sidecar label: grafana_dashboard=1)
+   - Tracing   : {{ if .Values.global.tracing.enabled }}AÇIK → {{ .Values.global.tracing.endpoint }} (oran {{ .Values.global.tracing.samplingRatio }}){{ else }}KAPALI (global.tracing.enabled=true ile açın){{ end }}
+   - Loglar    : stdout JSON → kümedeki toplayıcı (Alloy/Fluent Bit). Aynı namespace'i İKİ toplayıcı izlememeli.
+{{- if .Values.config.labEndpointsEnabled }}
+
+UYARI: config.labEndpointsEnabled=true — lab uç noktaları (fanout, failover tetikleme) AÇIK.
+       Üretim ortamında kapatın.
+{{- end }}

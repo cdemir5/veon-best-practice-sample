@@ -1,0 +1,103 @@
+# EFK: Fluent Bit DaemonSet → Elasticsearch — `fluent/fluent-bit` chart'ı için ÖRNEK values.
+#
+#   helm repo add fluent https://fluent.github.io/helm-charts
+#   kubectl -n logging create secret generic es-credentials \
+#     --from-literal=username=fluent-bit --from-literal=password='<parola>'
+#   helm upgrade --install fluent-bit fluent/fluent-bit -n logging \
+#     -f deploy/helm/examples/fluent-bit-efk.values.yaml --version <onaylı-sürüm>
+#
+# UYARI (VEON observability README ile aynı): Bir namespace'i aynı anda hem Alloy hem
+# Fluent Bit izlerse loglar ÇİFTLENİR. Geçişi namespace bazında yapın ve eski
+# toplayıcıda o namespace'i hariç tutun.
+#
+# Uygulama hiçbir şey bilmez: stdout'a tek satır JSON yazar. Kubernetes filtresi
+# (Merge_Log On) JSON'u alanlara açar → ES'te otel_trace_id, level, http_route ... alanları.
+
+env:
+  - name: ES_USER
+    valueFrom:
+      secretKeyRef: {name: es-credentials, key: username}
+  - name: ES_PASSWORD
+    valueFrom:
+      secretKeyRef: {name: es-credentials, key: password}
+
+# Disk buffer'ı node'da kalıcı olsun (pod restart'ında kuyruktaki loglar kaybolmasın)
+extraVolumes:
+  - name: flb-state
+    hostPath:
+      path: /var/fluent-bit/state
+      type: DirectoryOrCreate
+extraVolumeMounts:
+  - name: flb-state
+    mountPath: /var/fluent-bit/state
+
+config:
+  service: |
+    [SERVICE]
+        Daemon                    Off
+        Flush                     1
+        Log_Level                 info
+        Parsers_File              /fluent-bit/etc/parsers.conf
+        Parsers_File              /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server               On
+        HTTP_Listen               0.0.0.0
+        HTTP_Port                 2020
+        Health_Check              On
+        storage.path              /var/fluent-bit/state/flb-storage/
+        storage.sync              normal
+        storage.backlog.mem_limit 16M
+        storage.metrics           On
+
+  inputs: |
+    [INPUT]
+        Name              tail
+        # Yalnız uygulama namespace'i (pilot); diğerleri mevcut toplayıcıda kalır
+        Path              /var/log/containers/*_veon-ns_*.log
+        multiline.parser  cri, docker
+        Tag               kube.*
+        Mem_Buf_Limit     32MB
+        Skip_Long_Lines   On
+        storage.type      filesystem
+        DB                /var/fluent-bit/state/flb_kube.db
+
+  filters: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Merge_Log           On
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Labels              On
+        Annotations         Off
+
+    # İkinci savunma hattı: kimlik bilgisi kalıpları (uygulama zaten maskeler)
+    [FILTER]
+        Name    modify
+        Match   kube.*
+        Remove  authorization
+        Remove  password
+
+  outputs: |
+    [OUTPUT]
+        Name                     es
+        Match                    kube.*
+        Host                     elasticsearch-master.logging.svc.cluster.local
+        Port                     9200
+        HTTP_User                ${ES_USER}
+        HTTP_Passwd              ${ES_PASSWORD}
+        tls                      On
+        tls.verify               On
+        Logstash_Format          On
+        Logstash_Prefix          veon-logs
+        Suppress_Type_Name       On
+        Replace_Dots             On
+        # Retry'da aynı kaydı iki kez yazma
+        Generate_ID              On
+        Retry_Limit              10
+        storage.total_limit_size 1G
+
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: veon-observability

@@ -1,0 +1,208 @@
+# =============================================================================
+# veon-sample-app — varsayılan değerler (üretim-güvenli varsayılanlar)
+# Ortam bazlı farklar ayrı dosyada: examples/values-stage.yaml
+# =============================================================================
+
+global:
+  environment: stage
+  # Boş değilse tüm imajların başına eklenir (örn. özel registry mirror'ı)
+  imageRegistry: ""
+  imagePullSecrets: []        # [{name: registry-pull}]
+  # VEON uygulama chart'larıyla AYNI arayüz (profiles/application-tracing.example.yaml)
+  tracing:
+    enabled: false
+    endpoint: http://veon-observability-alloy.observability.svc.cluster.local:4318
+    samplingRatio: "0.1"      # üretimde 0.05–0.1; "1" yalnız sınırlı pilot için
+    environment: ""           # boşsa global.environment
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  backend:
+    repository: veon-sample/backend
+    tag: ""                   # boşsa Chart.appVersion
+    digest: ""                # üretimde sha256 digest pinleyin (tag'den önceliklidir)
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: veon-sample/frontend
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
+# -----------------------------------------------------------------------------
+# Uygulama konfigürasyonu → ConfigMap (gizli olmayan değerler)
+# -----------------------------------------------------------------------------
+config:
+  logLevel: INFO
+  # Lab uç noktaları (fanout, failover tetikleme, naive mod ...) — ÜRETİMDE false.
+  labEndpointsEnabled: false
+  redis:
+    mode: sentinel            # sentinel | standalone
+    url: redis://redis-master.redis.svc.cluster.local:6379/0   # yalnız standalone
+    sentinels:                # ayrı node/AZ'lerde TEK sayıda (3/5) sentinel
+      - redis-node-0.redis-headless.redis.svc.cluster.local:26379
+      - redis-node-1.redis-headless.redis.svc.cluster.local:26379
+      - redis-node-2.redis-headless.redis.svc.cluster.local:26379
+    masterName: mymaster
+    keyPrefix: vsa            # ortamlar Redis paylaşıyorsa ortam adını ekleyin
+    socketTimeoutSeconds: "0.5"
+    connectTimeoutSeconds: "0.5"
+    maxConnections: 100       # pod başına havuz üst sınırı
+    retries: 5
+  mongo:
+    database: veon_sample
+    timeoutMs: 3000
+    maxPoolSize: 50
+  cache:
+    ttlSeconds: 60
+  events:
+    streamMaxLen: 100000
+    queueSize: 10000
+    retentionDays: 30
+  worker:
+    group: audit-persister
+    batchSize: 200
+    claimIdleMs: 30000
+    maxDeliveries: 5
+  # Ek ortam değişkenleri (gizli OLMAYAN)
+  extraEnv: {}
+
+# -----------------------------------------------------------------------------
+# Gizli değerler chart DIŞINDA yönetilir (External Secrets / Sealed Secrets / Vault).
+# Chart yalnız mevcut Secret'a referans verir; values'a parola YAZILMAZ.
+#   kubectl -n veon-ns create secret generic veon-sample-secrets \
+#     --from-literal=redis-password=... --from-literal=sentinel-password=... \
+#     --from-literal=mongo-uri='mongodb://user:pass@mongo-0.mongo:27017,.../?replicaSet=rs0&authSource=admin'
+# -----------------------------------------------------------------------------
+secrets:
+  existingSecret: veon-sample-secrets
+  keys:
+    redisPassword: redis-password
+    redisSentinelPassword: sentinel-password   # boş bırakılırsa sentinel auth kullanılmaz
+    mongoUri: mongo-uri
+
+# -----------------------------------------------------------------------------
+backend:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {cpu: "1", memory: 384Mi}
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+worker:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 50m, memory: 160Mi}
+    limits: {cpu: 500m, memory: 320Mi}
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  # Kuyruk worker'ı CPU'ya göre değil BİRİKMEYE göre ölçeklenir (KEDA gerekli).
+  keda:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 8
+    lagCount: "500"
+    pollingInterval: 15
+    cooldownPeriod: 120
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+frontend:
+  replicaCount: 2
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 64Mi}
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  # Değişkenli proxy_pass için DNS çözücü
+  nginxResolver: kube-dns.kube-system.svc.cluster.local
+  # Arayüzdeki "Grafana'da aç" bağlantıları (boş bırakılabilir)
+  publicUrls:
+    grafana: ""
+    prometheus: ""
+    kibana: ""
+    jaeger: ""                # boşsa arayüzde Jaeger bağlantısı gösterilmez
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+migrations:
+  enabled: true               # pre-install/pre-upgrade hook Job (index + opsiyonel seed)
+  seedDemoData: false
+  activeDeadlineSeconds: 300
+  resources:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 192Mi}
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  host: veon-sample.example.com
+  tls: []                     # [{secretName: veon-sample-tls, hosts: [veon-sample.example.com]}]
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+
+# -----------------------------------------------------------------------------
+# Gözlemlenebilirlik (Prometheus Operator CRD'leri gerekir)
+# -----------------------------------------------------------------------------
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    # Prometheus'un serviceMonitorSelector'ına uyan label (kümeye göre değişir)
+    labels: {}
+  prometheusRule:
+    enabled: true
+    labels: {}
+  grafanaDashboard:
+    enabled: true
+    # kube-prometheus-stack Grafana sidecar'ının varsayılan seçici label'ı
+    labels:
+      grafana_dashboard: "1"
+    annotations: {}           # örn. grafana_folder: VEON
+
+networkPolicy:
+  enabled: true
+  # Metrik portuna (9100) yalnız bu namespace'lerden erişilir
+  prometheusNamespaces: [observability]
+  # Frontend'e (8080) yalnız bu namespace'lerdeki ingress controller erişir
+  ingressControllerNamespaces: [ingress-nginx]

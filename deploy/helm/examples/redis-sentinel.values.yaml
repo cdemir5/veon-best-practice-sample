@@ -1,0 +1,79 @@
+# Redis HA (Sentinel) — Bitnami `redis` chart'ı için ÖRNEK values.
+#
+#   kubectl create ns redis
+#   kubectl -n redis create secret generic redis-auth --from-literal=redis-password='<güçlü-parola>'
+#   helm upgrade --install redis oci://registry-1.docker.io/bitnamicharts/redis \
+#     -n redis -f deploy/helm/examples/redis-sentinel.values.yaml --version <onaylı-sürüm>
+#
+# ÖNEMLİ:
+#  * Bitnami 2025'te ücretsiz imaj kataloğunu daralttı (sürümlü imajlar bitnamilegacy'ye
+#    taşındı). Kurumda ONAYLI imaj kaynağını (özel registry mirror'ı / Bitnami Secure Images /
+#    alternatif operator) kullanın; values anahtarlarını kullandığınız chart sürümüyle doğrulayın.
+#  * Uygulama tarafında: REDIS_MODE=sentinel, master adı "mymaster",
+#    sentinel adresleri redis-node-N.redis-headless.redis.svc.cluster.local:26379.
+#  * auth.sentinel=true → Sentinel de AYNI parolayı kullanır; uygulama Secret'ında
+#    sentinel-password = redis-password olmalıdır.
+
+architecture: replication
+
+auth:
+  enabled: true
+  sentinel: true
+  existingSecret: redis-auth
+  existingSecretPasswordKey: redis-password
+
+sentinel:
+  enabled: true
+  masterSet: mymaster
+  quorum: 2                     # 3 sentinel'den 2'si "down" demeli
+  downAfterMilliseconds: 5000   # çok düşük → gereksiz failover; çok yüksek → uzun kesinti
+  failoverTimeout: 18000
+  parallelSyncs: 1
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 128Mi}
+
+# Sentinel modunda her pod = redis + sentinel container'ı (StatefulSet "redis-node")
+replica:
+  replicaCount: 3
+  # Aynı node'a iki Redis düşmesin (node kaybı = tek düğüm kaybı)
+  podAntiAffinityPreset: hard
+  persistence:
+    enabled: true
+    size: 4Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  pdb:
+    create: true
+    maxUnavailable: 1
+
+# Örnek uygulamadaki compose ayarlarıyla aynı ilkeler (bkz. infra/redis/redis-node.sh, docs/04)
+commonConfiguration: |-
+  appendonly yes
+  appendfsync everysec
+  save ""
+  maxmemory 384mb
+  # Stream / idempotency / kilit / stok taşıyan instance: eviction YOK.
+  # Saf cache için ayrı bir release + allkeys-lru kullanın.
+  maxmemory-policy noeviction
+  # Split-brain'de izole eski master'a yazılmasın (failover'da kısa NOREPLICAS penceresi bedeli var)
+  min-replicas-to-write 1
+  min-replicas-max-lag 10
+  slowlog-log-slower-than 10000
+  latency-monitor-threshold 100
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: veon-observability
+  sentinel:
+    enabled: true
+
+networkPolicy:
+  enabled: true
+  allowExternal: false
+  ingressNSMatchLabels:
+    kubernetes.io/metadata.name: veon-ns

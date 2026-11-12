@@ -1,0 +1,65 @@
+{{- if .Values.migrations.enabled }}
+# Index/şema migration'ı: her install/upgrade ÖNCESİNDE bir kez çalışır.
+# Hook, chart'ın ConfigMap/ServiceAccount'u oluşmadan çalıştığı için env burada açıkça verilir
+# ve varsayılan ServiceAccount kullanılır (token mount edilmez).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vsa.fullname" . }}-migrate
+  labels:
+    {{- include "vsa.componentLabels" (dict "ctx" . "component" "migrate") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    # Başarısız Job inceleme için kalır; başarılı olan silinir.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "vsa.podLabels" (dict "ctx" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "vsa.image" (dict "ctx" . "image" .Values.image.backend) }}
+          imagePullPolicy: {{ .Values.image.backend.pullPolicy }}
+          command: ["python", "-m", "app.migrate"]
+          env:
+            - name: MONGO_DB
+              value: {{ .Values.config.mongo.database | quote }}
+            - name: EVENTS_RETENTION_DAYS
+              value: {{ .Values.config.events.retentionDays | quote }}
+            - name: SEED_DEMO_DATA
+              value: {{ .Values.migrations.seedDemoData | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.global.environment | quote }}
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: {{ .Values.secrets.keys.mongoUri }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          securityContext:
+            {{- include "vsa.containerSecurityContext" (dict "ctx" . "uid" 10001) | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+{{- end }}

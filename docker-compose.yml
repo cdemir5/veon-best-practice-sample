@@ -1,0 +1,360 @@
+# VEON best-practice örnek uygulaması — local geliştirme stack'i.
+#
+#   make up        → uygulama + Redis HA + Mongo + Alloy/Tempo + Prometheus + Fluent Bit/Loki + Grafana
+#   make up-efk    → yukarıdakiler + Elasticsearch + Kibana (loglar Loki'ye VE ES'e)
+#
+# Görüntüler sabit sürümlüdür (latest yok). Parolalar .env'den gelir (bkz. .env.example).
+name: veon-sample
+
+# --------------------------------------------------------------------------- ortak bloklar
+x-app-logging: &app-logging
+  # Uygulama yalnız stdout'a yazar; Docker log'ları ASENKRON olarak Fluent Bit'e taşır.
+  # mode=non-blocking: Fluent Bit yavaş/kapalıysa uygulamanın stdout yazımı bloklanmaz
+  # (tampon dolarsa en eski log düşer — uygulama asla beklemez).
+  driver: fluentd
+  options:
+    fluentd-address: localhost:24224
+    fluentd-async: "true"
+    fluentd-retry-wait: "1s"
+    fluentd-max-retries: "60"
+    mode: non-blocking
+    max-buffer-size: 4m
+    tag: "app.{{.Name}}"
+    labels: com.docker.compose.service
+
+x-app-env: &app-env
+  APP_VERSION: ${APP_VERSION:-0.1.0}
+  DEPLOYMENT_ENVIRONMENT: local
+  LOG_LEVEL: INFO
+  LAB_ENDPOINTS_ENABLED: "true"
+  LAB_FANOUT_BASE_URL: http://frontend:8080
+  SIMULATED_DB_LATENCY_MS: "300"
+  # --- Redis HA (agentic-core ile aynı değişken isimleri) ---
+  REDIS_MODE: sentinel
+  REDIS_SENTINELS: '["sentinel-1:26379","sentinel-2:26379","sentinel-3:26379"]'
+  REDIS_SENTINEL_MASTER_NAME: mymaster
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+  REDIS_SENTINEL_PASSWORD: ${REDIS_SENTINEL_PASSWORD:-change-me-sentinel}
+  # --- MongoDB ---
+  MONGO_URI: mongodb://mongo:27017/?appName=veon-sample
+  MONGO_DB: veon_sample
+  # --- Tracing (standart OTel değişkenleri) ---
+  OTEL_SDK_DISABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_SAMPLER_ARG: "1.0"  # local: her şeyi örnekle. Üretimde 0.05–0.1
+
+x-redis-node: &redis-node
+  image: redis:7.4.2-alpine
+  user: redis
+  entrypoint: ["sh", "/opt/redis/redis-node.sh"]
+  volumes:
+    - ./infra/redis/redis-node.sh:/opt/redis/redis-node.sh:ro
+  healthcheck:
+    test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+  restart: unless-stopped
+
+x-sentinel: &sentinel
+  image: redis:7.4.2-alpine
+  user: redis
+  entrypoint: ["sh", "/opt/redis/sentinel.sh"]
+  volumes:
+    - ./infra/redis/sentinel.sh:/opt/redis/sentinel.sh:ro
+  healthcheck:
+    test: ["CMD-SHELL", "redis-cli -p 26379 --no-auth-warning -a \"$$SENTINEL_PASSWORD\" ping | grep -q PONG"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+  depends_on:
+    redis-master: {condition: service_healthy}
+  restart: unless-stopped
+
+x-sentinel-env: &sentinel-env
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+  SENTINEL_PASSWORD: ${REDIS_SENTINEL_PASSWORD:-change-me-sentinel}
+  MASTER_HOST: redis-master
+  QUORUM: "2"
+
+services:
+  # ============================================================== uygulama
+  frontend:
+    build: ./frontend
+    image: veon-sample/frontend:${APP_VERSION:-0.1.0}
+    ports: ["${FRONTEND_PORT:-8080}:8080"]
+    environment:
+      BACKEND_URL: http://backend:8000
+      NGINX_RESOLVER: 127.0.0.11
+      GRAFANA_PUBLIC_URL: http://localhost:${GRAFANA_PORT:-3000}
+      PROMETHEUS_PUBLIC_URL: http://localhost:${PROMETHEUS_PORT:-9090}
+      KIBANA_PUBLIC_URL: http://localhost:${KIBANA_PORT:-5601}
+      JAEGER_PUBLIC_URL: http://localhost:${JAEGER_PORT:-16686}
+    depends_on:
+      fluent-bit: {condition: service_started}
+      backend: {condition: service_healthy}
+    logging: *app-logging
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      target: runtime
+    image: veon-sample/backend:${APP_VERSION:-0.1.0}
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: veon-sample-backend
+    deploy:
+      replicas: 2  # dağıtık kilit / cache / rate-limit davranışını çoklu replikada göstermek için
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 25s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      sentinel-1: {condition: service_healthy}
+      sentinel-2: {condition: service_healthy}
+      sentinel-3: {condition: service_healthy}
+      fluent-bit: {condition: service_started}
+      alloy: {condition: service_started}
+    logging: *app-logging
+    restart: unless-stopped
+
+  worker:
+    image: veon-sample/backend:${APP_VERSION:-0.1.0}  # API ile aynı imaj, farklı komut
+    pull_policy: never
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: veon-sample-worker
+    deploy:
+      replicas: 2  # consumer group mesajları replikalar arasında paylaştırır
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 15s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      sentinel-1: {condition: service_healthy}
+      sentinel-2: {condition: service_healthy}
+      sentinel-3: {condition: service_healthy}
+    logging: *app-logging
+    restart: unless-stopped
+
+  migrate:
+    image: veon-sample/backend:${APP_VERSION:-0.1.0}
+    pull_policy: never
+    command: ["python", "-m", "app.migrate"]
+    environment:
+      MONGO_URI: mongodb://mongo:27017/?appName=veon-sample-migrate
+      MONGO_DB: veon_sample
+      SEED_DEMO_DATA: "true"
+      DEPLOYMENT_ENVIRONMENT: local
+    depends_on:
+      mongo: {condition: service_healthy}
+      fluent-bit: {condition: service_started}
+    logging: *app-logging
+    restart: "no"
+
+  backend-tests:
+    profiles: [test]
+    build:
+      context: ./backend
+      target: test
+    environment:
+      <<: *app-env
+      TEST_REDIS_INTEGRATION: "1"
+      OTEL_SDK_DISABLED: "true"
+    depends_on:
+      sentinel-1: {condition: service_healthy}
+      sentinel-2: {condition: service_healthy}
+      sentinel-3: {condition: service_healthy}
+
+  # ============================================================== veri katmanı
+  mongo:
+    image: mongo:7.0.16
+    # Local örnek: tek düğüm, auth kapalı. Üretimde: replica set (3 üye) + auth + TLS.
+    ports: ["127.0.0.1:${MONGO_PORT:-27017}:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # --- Redis HA: 1 master + 2 replica + 3 sentinel (quorum=2) ---
+  redis-master:
+    <<: *redis-node
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+      ANNOUNCE_HOST: redis-master
+
+  redis-replica-1:
+    <<: *redis-node
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+      ANNOUNCE_HOST: redis-replica-1
+      REPLICA_OF: redis-master
+    depends_on:
+      redis-master: {condition: service_healthy}
+
+  redis-replica-2:
+    <<: *redis-node
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+      ANNOUNCE_HOST: redis-replica-2
+      REPLICA_OF: redis-master
+    depends_on:
+      redis-master: {condition: service_healthy}
+
+  sentinel-1:
+    <<: *sentinel
+    environment:
+      <<: *sentinel-env
+      ANNOUNCE_HOST: sentinel-1
+
+  sentinel-2:
+    <<: *sentinel
+    environment:
+      <<: *sentinel-env
+      ANNOUNCE_HOST: sentinel-2
+
+  sentinel-3:
+    <<: *sentinel
+    environment:
+      <<: *sentinel-env
+      ANNOUNCE_HOST: sentinel-3
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    environment:
+      REDIS_ADDR: ""  # multi-target: hedefler Prometheus'tan /scrape?target= ile gelir
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+    restart: unless-stopped
+
+  # ============================================================== gözlemlenebilirlik
+  alloy:
+    image: grafana/alloy:v1.5.1
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/tmp/alloy",
+              "/etc/alloy/config.alloy"]
+    volumes:
+      - ./infra/alloy/config.alloy:/etc/alloy/config.alloy:ro
+    ports: ["127.0.0.1:${ALLOY_PORT:-12345}:12345"]
+    depends_on: [tempo, jaeger]
+    restart: unless-stopped
+
+  # Jaeger v2 (all-in-one, bellek içi depolama — yalnız local). Alloy trace'leri hem Tempo'ya
+  # hem Jaeger'a gönderir (fan-out); uygulama yalnız Alloy'u bilir, kod değişmez.
+  jaeger:
+    image: jaegertracing/jaeger:2.5.0
+    ports:
+      - "${JAEGER_PORT:-16686}:16686"   # UI + query API
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./infra/loki/loki.yaml:/etc/loki/loki.yaml:ro
+    restart: unless-stopped
+
+  fluent-bit:
+    image: fluent/fluent-bit:3.2.4
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+    environment:
+      # EFK kapalıyken ES çıkışı hiçbir tag ile eşleşmez → bağlantı denemesi yok.
+      FLUENT_ES_MATCH: ${FLUENT_ES_MATCH:-__efk_disabled__}
+    ports:
+      - "127.0.0.1:24224:24224"  # Docker daemon'ın fluentd log driver'ı buraya bağlanır
+    volumes:
+      - ./infra/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./infra/fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - ./infra/fluent-bit/redact.lua:/fluent-bit/etc/redact.lua:ro
+      - fluent-bit-buffer:/fluent-bit/buffer
+    depends_on: [loki]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+      - --enable-feature=exemplar-storage      # metrik → trace geçişi
+      - --web.enable-remote-write-receiver     # Tempo metrics-generator yazar
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      # YALNIZ LOCAL: anonim erişim. Üretimde (VEON) anonim erişim KAPALI, SSO/kimlikli.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    depends_on: [prometheus, loki, tempo]
+    restart: unless-stopped
+
+  # ============================================================== EFK profili
+  elasticsearch:
+    profiles: [efk]
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"  # YALNIZ LOCAL. Üretimde TLS + kimlik doğrulama zorunlu.
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes: [es-data:/usr/share/elasticsearch/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  kibana:
+    profiles: [efk]
+    image: docker.elastic.co/kibana/kibana:8.17.0
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports: ["${KIBANA_PORT:-5601}:5601"]
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+    restart: unless-stopped
+
+  kibana-setup:
+    profiles: [efk]
+    image: curlimages/curl:8.11.1
+    entrypoint: ["sh", "/setup.sh"]
+    volumes:
+      - ./infra/kibana/setup.sh:/setup.sh:ro
+    depends_on: [kibana]
+    restart: "no"
+
+volumes:
+  mongo-data:
+  es-data:
+  fluent-bit-buffer:

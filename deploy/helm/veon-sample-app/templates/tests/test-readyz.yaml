@@ -1,0 +1,29 @@
+# `helm test <release>` — kurulum sonrası API'nin hazır olduğunu doğrular.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "vsa.fullname" . }}-test-readyz
+  labels:
+    {{- include "vsa.componentLabels" (dict "ctx" . "component" "test") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command:
+        - curl
+        - -fsS
+        - --max-time
+        - "5"
+        - http://{{ include "vsa.fullname" . }}-backend:8000/readyz
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {cpu: 100m, memory: 32Mi}
+      securityContext:
+        {{- include "vsa.containerSecurityContext" (dict "ctx" . "uid" 100) | nindent 8 }}

@@ -1,0 +1,79 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "vsa.fullname" . -}}
+{{- $np := .Values.networkPolicy -}}
+# Varsayılan reddet + yalnız gereken akışlara izin (ingress yönü).
+# Egress kümenin mevcut politikasına bırakılır (VEON observability chart'ı ile aynı yaklaşım).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-backend
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vsa.selectorLabels" (dict "ctx" . "component" "backend") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # API: yalnız bu release'in pod'larından (frontend nginx, lab fanout, helm test)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 8000
+    - from:
+        {{- range $np.prometheusNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: 9100
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vsa.selectorLabels" (dict "ctx" . "component" "worker") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- range $np.prometheusNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: 9100
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-frontend
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vsa.selectorLabels" (dict "ctx" . "component" "frontend") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- range $np.ingressControllerNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 8080
+{{- end }}

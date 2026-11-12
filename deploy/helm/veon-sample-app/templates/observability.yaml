@@ -1,0 +1,116 @@
+{{- $fullname := include "vsa.fullname" . -}}
+{{- $api := printf "%s-backend" $fullname -}}
+{{- $worker := printf "%s-worker" $fullname -}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+---
+# Prometheus Operator: backend ve worker Service'lerinin `metrics` portunu scrape eder.
+# Exemplar (metrik → trace) için Prometheus CR'ında `enableFeatures: [exemplar-storage]` gerekir.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      veon-sample/metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}
+{{- if .Values.metrics.prometheusRule.enabled }}
+---
+# Semptoma (kullanıcı etkisi) alarm; nedenler dashboard'da.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $fullname }}.api
+      rules:
+        - alert: VeonSampleHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",job="{{ $api }}",status=~"5.."}[5m]))
+              / clamp_min(sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",job="{{ $api }}"}[5m])), 1e-9) > 0.05
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "{{ $api }} 5xx oranı %5 üzerinde"
+        - alert: VeonSampleHighLatencyP95
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="{{ .Release.Namespace }}",job="{{ $api }}",route!~"/api/lab/.*"}[5m]))) > 1
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $api }} p95 gecikme 1 sn üzerinde"
+    - name: {{ $fullname }}.pipeline
+      rules:
+        - alert: VeonSampleEventsDropped
+          expr: sum(increase(events_dropped_total{namespace="{{ .Release.Namespace }}",job="{{ $api }}"}[10m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Audit/event kaydı kaybedildi (kuyruk dolu veya Redis erişilemez)"
+        - alert: VeonSampleLogsDropped
+          expr: sum(increase(app_logs_dropped_total{namespace="{{ .Release.Namespace }}"}[10m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "Uygulama log kuyruğu taştı"
+        - alert: VeonSampleEventLagHigh
+          expr: max(events_stream_lag{namespace="{{ .Release.Namespace }}",job="{{ $worker }}"}) > 1000 or max(events_stream_pending{namespace="{{ .Release.Namespace }}",job="{{ $worker }}"}) > 1000
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Event worker geride kalıyor (lag/pending > 1000)"
+        - alert: VeonSampleDeadLetters
+          expr: sum(increase(events_dead_lettered_total{namespace="{{ .Release.Namespace }}",job="{{ $worker }}"}[15m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "DLQ'ya event düştü — elle inceleme gerekli"
+        - alert: VeonSampleWorkerDown
+          expr: absent(up{namespace="{{ .Release.Namespace }}",job="{{ $worker }}"} == 1)
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Çalışan event worker yok"
+        - alert: VeonSampleRedisClientErrors
+          expr: sum(rate(redis_errors_total{namespace="{{ .Release.Namespace }}",job=~"{{ $api }}|{{ $worker }}"}[5m])) > 1
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "Uygulama Redis hataları alıyor (degrade modda olabilir)"
+{{- end }}
+{{- if .Values.metrics.grafanaDashboard.enabled }}
+---
+# Grafana sidecar'ı bu label'lı ConfigMap'leri otomatik yükler (dashboard-as-code).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-dashboard
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+    {{- with .Values.metrics.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.metrics.grafanaDashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  veon-sample-overview.json: |-
+{{ .Files.Get "files/veon-sample-overview.json" | indent 4 }}
+{{- end }}

@@ -1,0 +1,40 @@
+{{- $c := .Values.config -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vsa.fullname" . }}-config
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+data:
+  APP_VERSION: {{ default .Chart.AppVersion .Values.image.backend.tag | quote }}
+  DEPLOYMENT_ENVIRONMENT: {{ .Values.global.environment | quote }}
+  LOG_LEVEL: {{ $c.logLevel | quote }}
+  LAB_ENDPOINTS_ENABLED: {{ $c.labEndpointsEnabled | quote }}
+  LAB_FANOUT_BASE_URL: {{ printf "http://%s-backend:8000" (include "vsa.fullname" .) | quote }}
+  OTEL_SDK_DISABLED: {{ not .Values.global.tracing.enabled | quote }}
+  # --- Redis ---
+  REDIS_MODE: {{ $c.redis.mode | quote }}
+  REDIS_URL: {{ $c.redis.url | quote }}
+  REDIS_SENTINELS: {{ toJson $c.redis.sentinels | quote }}
+  REDIS_SENTINEL_MASTER_NAME: {{ $c.redis.masterName | quote }}
+  REDIS_KEY_PREFIX: {{ $c.redis.keyPrefix | quote }}
+  REDIS_SOCKET_TIMEOUT: {{ $c.redis.socketTimeoutSeconds | quote }}
+  REDIS_CONNECT_TIMEOUT: {{ $c.redis.connectTimeoutSeconds | quote }}
+  REDIS_MAX_CONNECTIONS: {{ $c.redis.maxConnections | quote }}
+  REDIS_RETRIES: {{ $c.redis.retries | quote }}
+  # --- MongoDB (URI Secret'tan) ---
+  MONGO_DB: {{ $c.mongo.database | quote }}
+  MONGO_TIMEOUT_MS: {{ $c.mongo.timeoutMs | quote }}
+  MONGO_MAX_POOL_SIZE: {{ $c.mongo.maxPoolSize | quote }}
+  # --- Cache / events / worker ---
+  CACHE_TTL_SECONDS: {{ $c.cache.ttlSeconds | quote }}
+  EVENTS_STREAM_MAXLEN: {{ $c.events.streamMaxLen | quote }}
+  EVENTS_QUEUE_SIZE: {{ $c.events.queueSize | quote }}
+  EVENTS_RETENTION_DAYS: {{ $c.events.retentionDays | quote }}
+  WORKER_GROUP: {{ $c.worker.group | quote }}
+  WORKER_BATCH_SIZE: {{ $c.worker.batchSize | quote }}
+  WORKER_CLAIM_IDLE_MS: {{ $c.worker.claimIdleMs | quote }}
+  WORKER_MAX_DELIVERIES: {{ $c.worker.maxDeliveries | quote }}
+  {{- range $key, $value := $c.extraEnv }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

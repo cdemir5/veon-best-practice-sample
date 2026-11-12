@@ -1,0 +1,86 @@
+# Örnek alarm kuralları (local). Helm chart'taki PrometheusRule ile aynı mantık.
+# Kural: semptoma (kullanıcı etkisi) alarm, nedene dashboard.
+groups:
+  - name: veon-sample.api
+    rules:
+      - alert: VeonSampleHighErrorRate
+        expr: |
+          sum by (job) (rate(http_requests_total{job="backend",status=~"5.."}[5m]))
+            / clamp_min(sum by (job) (rate(http_requests_total{job="backend"}[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "API 5xx oranı %5 üzerinde"
+          description: "{{ $labels.job }} son 5 dk 5xx oranı {{ $value | humanizePercentage }}."
+      - alert: VeonSampleHighLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket{job="backend",route!~"/api/lab/.*"}[5m]))) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "API p95 gecikme 1 sn üzerinde"
+
+  - name: veon-sample.pipeline
+    rules:
+      - alert: VeonSampleEventsDropped
+        expr: sum(increase(events_dropped_total[10m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Audit/event kaydı kaybedildi"
+          description: "Bellek kuyruğu dolu veya Redis erişilemez. events_dropped_total reason label'ına bakın."
+      - alert: VeonSampleLogsDropped
+        expr: sum(increase(app_logs_dropped_total[10m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Uygulama log kuyruğu taştı (stdout yavaş/bloklu)"
+      - alert: VeonSampleEventLagHigh
+        expr: max(events_stream_lag) > 1000 or max(events_stream_pending) > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Event worker geride kalıyor (lag/pending > 1000)"
+          description: "Worker replika sayısını artırın veya MongoDB yazma gecikmesini kontrol edin."
+      - alert: VeonSampleDeadLetters
+        expr: sum(increase(events_dead_lettered_total[15m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "DLQ'ya event düştü — elle inceleme gerekli"
+      - alert: VeonSampleWorkerDown
+        expr: absent(up{job="worker"} == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Hiç çalışan event worker yok"
+      - alert: VeonSampleWorkerStalled
+        expr: (time() - max(worker_last_success_timestamp_seconds)) > 300 and max(events_stream_lag) > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Worker 5 dk'dır başarılı batch yazamıyor ve bekleyen olay var"
+
+  - name: veon-sample.redis
+    rules:
+      - alert: VeonSampleRedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Redis düğümü erişilemez: {{ $labels.instance }}"
+      - alert: VeonSampleRedisReplicaMissing
+        expr: max(redis_connected_slaves) < 2
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Master'a bağlı replika sayısı beklenenden az (HA zayıfladı)"
+      - alert: VeonSampleRedisMemoryHigh
+        expr: max by (instance) (redis_memory_used_bytes / clamp_min(redis_memory_max_bytes, 1)) > 0.85
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis maxmemory %85 üzerinde (noeviction → yazmalar reddedilecek)"
+      - alert: VeonSampleRedisClientErrors
+        expr: sum(rate(redis_errors_total[5m])) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Uygulama Redis hataları alıyor (degrade modda çalışıyor olabilir)"

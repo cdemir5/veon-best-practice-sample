@@ -1,0 +1,20 @@
+{{- /*
+VEON uygulama chart'larındaki `agentic-tracing-config` ile aynı desen:
+tracing yalnız global.tracing.enabled=true iken açılır; checksum sayesinde
+yalnız bu değer değiştiğinde pod'lar yeniden başlar.
+*/ -}}
+{{- if .Values.global.tracing.enabled }}
+{{- $t := .Values.global.tracing }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vsa.fullname" . }}-tracing
+  labels:
+    {{- include "vsa.labels" . | nindent 4 }}
+data:
+  OTEL_SDK_DISABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ required "global.tracing.endpoint gerekli" $t.endpoint | quote }}
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_SAMPLER_ARG: {{ $t.samplingRatio | quote }}
+  DEPLOYMENT_ENVIRONMENT: {{ default .Values.global.environment $t.environment | quote }}
+{{- end }}

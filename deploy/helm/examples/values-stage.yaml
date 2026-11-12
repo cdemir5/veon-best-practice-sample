@@ -1,0 +1,67 @@
+# Stage örneği:
+#   helm upgrade --install vsa deploy/helm/veon-sample-app -n veon-ns --create-namespace \
+#     -f deploy/helm/examples/values-stage.yaml --atomic --timeout 10m
+# Ön koşul: veon-sample-secrets Secret'ı (bkz. values.yaml → secrets) ve Redis Sentinel kümesi.
+global:
+  environment: stage
+  imageRegistry: registry.example.com/veon
+  imagePullSecrets:
+    - name: registry-pull
+  tracing:
+    enabled: true
+    endpoint: http://veon-observability-alloy.observability.svc.cluster.local:4318
+    samplingRatio: "0.1"
+
+image:
+  backend:
+    repository: veon-sample/backend
+    tag: "0.1.0"
+  frontend:
+    repository: veon-sample/frontend
+    tag: "0.1.0"
+
+config:
+  labEndpointsEnabled: true   # stage'de lab ekranı açık; üretimde false
+  redis:
+    mode: sentinel
+    # examples/redis-sentinel.values.yaml ile kurulan "redis" release'i (namespace: redis)
+    sentinels:
+      - redis-node-0.redis-headless.redis.svc.cluster.local:26379
+      - redis-node-1.redis-headless.redis.svc.cluster.local:26379
+      - redis-node-2.redis-headless.redis.svc.cluster.local:26379
+    masterName: mymaster
+    keyPrefix: vsa-stage
+
+secrets:
+  existingSecret: veon-sample-secrets
+
+migrations:
+  seedDemoData: true
+
+ingress:
+  enabled: true
+  className: nginx
+  host: veon-sample.stage.example.com
+  tls:
+    - secretName: veon-sample-tls
+      hosts: [veon-sample.stage.example.com]
+
+frontend:
+  publicUrls:
+    grafana: https://grafana.stage.example.com
+
+metrics:
+  serviceMonitor:
+    labels:
+      release: veon-observability   # kümedeki Prometheus serviceMonitorSelector'ına göre
+  prometheusRule:
+    labels:
+      release: veon-observability
+
+networkPolicy:
+  prometheusNamespaces: [observability]
+  ingressControllerNamespaces: [ingress-nginx]
+
+worker:
+  keda:
+    enabled: false   # KEDA kuruluysa true: lag'e göre 1..8 replika

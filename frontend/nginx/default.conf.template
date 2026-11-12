@@ -1,0 +1,80 @@
+# nginx: SPA statik dosyaları + /api reverse proxy.
+# Bu dosya container açılışında envsubst ile işlenir (yalnız tanımlı env değişkenleri).
+#   BACKEND_URL          örn. http://backend:8000  /  http://<release>-backend:8000
+#   NGINX_RESOLVER       Docker: 127.0.0.11 · K8s: kube-dns.kube-system.svc.cluster.local
+#   GRAFANA_PUBLIC_URL, PROMETHEUS_PUBLIC_URL, KIBANA_PUBLIC_URL, JAEGER_PUBLIC_URL → /config.js
+
+map $http_x_request_id $req_id {
+    default $http_x_request_id;
+    ""      $request_id;          # istemci göndermediyse nginx üretir
+}
+
+# JSON access log → stdout → Fluent Bit/Alloy. Query string ($args) LOGLANMAZ (PII riski).
+log_format json_access escape=json
+  '{"ts":"$time_iso8601","level":"INFO","service":"veon-sample-frontend",'
+  '"logger":"nginx.access","message":"http_request","request_id":"$req_id",'
+  '"http_method":"$request_method","http_path":"$uri","http_status":$status,'
+  '"bytes_sent":$body_bytes_sent,"duration_s":$request_time,'
+  '"upstream_s":"$upstream_response_time","upstream":"$upstream_addr"}';
+
+server {
+    listen 8080;
+    server_tokens off;
+    root /usr/share/nginx/html;
+
+    access_log /dev/stdout json_access;
+    error_log  /dev/stderr warn;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # Güvenlik header'ları (location bloklarında add_header KULLANILMAZ: miras bozulur)
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" always;
+
+    # Değişkenli proxy_pass → DNS çalışma zamanında çözülür (replika IP'leri değişebilir).
+    resolver ${NGINX_RESOLVER} valid=10s ipv6=off;
+    set $backend_upstream ${BACKEND_URL};
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok";
+    }
+
+    # Çalışma zamanı konfigürasyonu: aynı imaj her ortamda (12-factor).
+    location = /config.js {
+        default_type application/javascript;
+        expires epoch;
+        return 200 'window.__APP_CONFIG__ = {"grafanaUrl":"${GRAFANA_PUBLIC_URL}","prometheusUrl":"${PROMETHEUS_PUBLIC_URL}","kibanaUrl":"${KIBANA_PUBLIC_URL}","jaegerUrl":"${JAEGER_PUBLIC_URL}"};';
+    }
+
+    location /api/ {
+        proxy_pass $backend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $req_id;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 30s;
+        # POST/PUT otomatik tekrar EDİLMEZ (non_idempotent yok) → çift işlem riski yok.
+        proxy_next_upstream error timeout http_502 http_503;
+        proxy_next_upstream_tries 2;
+        client_max_body_size 1m;
+    }
+
+    # Hash'li statik dosyalar: uzun süreli cache.
+    location /assets/ {
+        expires 1y;
+        access_log off;
+    }
+
+    location / {
+        try_files $uri /index.html;
+        expires epoch;  # index.html her zaman taze (yeni sürüm hemen gelsin)
+    }
+}

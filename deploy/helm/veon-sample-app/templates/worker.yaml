@@ -1,0 +1,146 @@
+{{- $fullname := include "vsa.fullname" . -}}
+{{- $component := dict "ctx" . "component" "worker" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "vsa.componentLabels" $component | nindent 4 }}
+spec:
+  {{- if not .Values.worker.keda.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "vsa.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vsa.podLabels" $component | nindent 8 }}
+      annotations:
+        {{- include "vsa.checksums" . | nindent 8 }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "vsa.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # SIGTERM → mevcut batch bitirilir ve ACK'lenir; ACK'lenmeyenler başka pod'ca devralınır.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- include "vsa.topologySpread" $component | nindent 6 }}
+      containers:
+        - name: worker
+          image: {{ include "vsa.image" (dict "ctx" . "image" .Values.image.backend) }}
+          imagePullPolicy: {{ .Values.image.backend.pullPolicy }}
+          command: ["python", "-m", "app.worker"]
+          ports:
+            - name: metrics
+              containerPort: 9100
+          envFrom:
+            {{- include "vsa.envFrom" . | nindent 12 }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: {{ $fullname }}-worker
+            {{- include "vsa.secretEnv" . | nindent 12 }}
+          # HTTP sunucusu yok: ana döngü heartbeat dosyasını günceller; takılırsa restart.
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "app.healthcheck"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- include "vsa.containerSecurityContext" (dict "ctx" . "uid" 10001) | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# Yalnız metrik scrape'i için (ServiceMonitor bir Service üzerinden hedef bulur).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "vsa.componentLabels" $component | nindent 4 }}
+    veon-sample/metrics: "true"
+spec:
+  clusterIP: None
+  selector:
+    {{- include "vsa.selectorLabels" $component | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+{{- if .Values.worker.keda.enabled }}
+{{- if ne .Values.config.redis.mode "sentinel" }}
+{{- fail "worker.keda örneği redis-sentinel-streams tetikleyicisi kullanır; config.redis.mode=sentinel olmalı" }}
+{{- end }}
+---
+# KEDA: worker'ı consumer group LAG'ine göre ölçekle (CPU kuyruk birikmesini göstermez).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $fullname }}-worker
+  labels:
+    {{- include "vsa.componentLabels" $component | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ $fullname }}-worker
+  minReplicaCount: {{ .Values.worker.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.worker.keda.maxReplicas }}
+  pollingInterval: {{ .Values.worker.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.worker.keda.cooldownPeriod }}
+  triggers:
+    - type: redis-sentinel-streams
+      metadata:
+        addresses: {{ join ", " .Values.config.redis.sentinels | quote }}
+        sentinelMaster: {{ .Values.config.redis.masterName | quote }}
+        stream: {{ printf "%s:events:audit" .Values.config.redis.keyPrefix | quote }}
+        consumerGroup: {{ .Values.config.worker.group | quote }}
+        lagCount: {{ .Values.worker.keda.lagCount | quote }}
+      authenticationRef:
+        name: {{ $fullname }}-keda-redis
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ $fullname }}-keda-redis
+  labels:
+    {{- include "vsa.componentLabels" $component | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: {{ .Values.secrets.existingSecret }}
+      key: {{ .Values.secrets.keys.redisPassword }}
+    {{- if .Values.secrets.keys.redisSentinelPassword }}
+    - parameter: sentinelPassword
+      name: {{ .Values.secrets.existingSecret }}
+      key: {{ .Values.secrets.keys.redisSentinelPassword }}
+    {{- end }}
+{{- end }}

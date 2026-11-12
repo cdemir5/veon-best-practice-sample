@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+frontend/dist/
+*.tgz
+!deploy/helm/**/charts/*.tgz
+.DS_Store

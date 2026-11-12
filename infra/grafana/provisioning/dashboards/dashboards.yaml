@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: veon-sample
+    folder: VEON Sample
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false  # Dashboard-as-code: değişiklik repoda yapılır
+    options:
+      path: /var/lib/grafana/dashboards

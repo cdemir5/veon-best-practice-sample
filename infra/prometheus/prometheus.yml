@@ -1,0 +1,68 @@
+# Prometheus — local compose. Kubernetes'te bunun yerine ServiceMonitor kullanılır
+# (deploy/helm/veon-sample-app/templates/servicemonitor.yaml).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # backend birden fazla replika: Docker DNS tüm container IP'lerini döndürür.
+  - job_name: backend
+    dns_sd_configs:
+      - names: [backend]
+        type: A
+        port: 9100
+        refresh_interval: 15s
+
+  - job_name: worker
+    dns_sd_configs:
+      - names: [worker]
+        type: A
+        port: 9100
+        refresh_interval: 15s
+
+  # redis_exporter multi-target modu: tek exporter, tüm Redis düğümleri.
+  - job_name: redis
+    metrics_path: /scrape
+    static_configs:
+      - targets:
+          - redis://redis-master:6379
+          - redis://redis-replica-1:6379
+          - redis://redis-replica-2:6379
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: redis-exporter:9121
+
+  - job_name: alloy
+    static_configs:
+      - targets: [alloy:12345]
+
+  - job_name: fluent-bit
+    metrics_path: /api/v2/metrics/prometheus
+    static_configs:
+      - targets: [fluent-bit:2020]
+
+  - job_name: loki
+    static_configs:
+      - targets: [loki:3100]
+
+  - job_name: tempo
+    static_configs:
+      - targets: [tempo:3200]
+
+  # Jaeger v2 = OTel Collector tabanlı; kendi otelcol_* metriklerini :8888'de yayınlar.
+  - job_name: jaeger
+    static_configs:
+      - targets: [jaeger:8888]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

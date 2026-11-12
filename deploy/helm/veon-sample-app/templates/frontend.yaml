@@ -1,0 +1,111 @@
+{{- $fullname := include "vsa.fullname" . -}}
+{{- $component := dict "ctx" . "component" "frontend" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-frontend
+  labels:
+    {{- include "vsa.componentLabels" $component | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "vsa.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vsa.podLabels" $component | nindent 8 }}
+      {{- with .Values.frontend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "vsa.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "vsa.topologySpread" $component | nindent 6 }}
+      containers:
+        - name: frontend
+          image: {{ include "vsa.image" (dict "ctx" . "image" .Values.image.frontend) }}
+          imagePullPolicy: {{ .Values.image.frontend.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BACKEND_URL
+              value: {{ printf "http://%s-backend:8000" $fullname | quote }}
+            - name: NGINX_RESOLVER
+              value: {{ .Values.frontend.nginxResolver | quote }}
+            - name: GRAFANA_PUBLIC_URL
+              value: {{ .Values.frontend.publicUrls.grafana | quote }}
+            - name: PROMETHEUS_PUBLIC_URL
+              value: {{ .Values.frontend.publicUrls.prometheus | quote }}
+            - name: KIBANA_PUBLIC_URL
+              value: {{ .Values.frontend.publicUrls.kibana | quote }}
+            - name: JAEGER_PUBLIC_URL
+              value: {{ .Values.frontend.publicUrls.jaeger | quote }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          securityContext:
+            {{- include "vsa.containerSecurityContext" (dict "ctx" . "uid" 101) | nindent 12 }}
+          volumeMounts:
+            # read-only root FS: nginx'in yazdığı yerler emptyDir
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: nginx-conf
+          emptyDir:
+            sizeLimit: 1Mi
+      {{- with .Values.frontend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-frontend
+  labels:
+    {{- include "vsa.componentLabels" $component | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "vsa.selectorLabels" $component | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
